@@ -51,3 +51,5 @@ out/
 Thumbs.db
 *.db
 *.sqlite
+backend/chroma_db/
+backend/vector_store.db
