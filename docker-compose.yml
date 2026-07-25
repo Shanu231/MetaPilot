@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: metapilot_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: metapilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: metapilot_redis
+    restart: always
+    ports:
+      - "6379:6379"
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: metapilot_backend
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@db:5432/metapilot
+      - REDIS_URL=redis://redis:6379/0
+      - JWT_SECRET_KEY=3b00c9e62f58e1c6cd1492ba268db45136873322aa6006f157ad71249b2ef1e0
+      - JWT_ALGORITHM=HS256
+      - ALLOWED_CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+    depends_on:
+      - db
+      - redis
+
+volumes:
+  postgres_data:
