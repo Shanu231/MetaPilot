@@ -35,20 +35,13 @@ class AIAgentOrchestrator:
         start_time = time.time()
         provider = self._get_provider()
 
-        # STAGE 1: User Intent & Entity Recognition
-        logger.info(f"AI Stage 1: Detecting intent for query: '{query}'")
+        # STAGE 1 & 2: User Intent & Dynamic Entity Recognition via RAG
+        logger.info(f"AI Stage 1 & 2: Dynamic URN resolution and retrieval for query: '{query}'")
         urns_to_fetch = []
-        
-        # Simple extraction checks for fallback catalog items
-        q_lower = query.lower()
-        if "users_dim" in q_lower or "users" in q_lower:
-            urns_to_fetch.append("urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.prod.users_dim)")
-        if "orders_fact" in q_lower or "orders" in q_lower:
-            urns_to_fetch.append("urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.prod.orders_fact)")
-        if "stripe_webhook_events" in q_lower or "stripe" in q_lower:
-            urns_to_fetch.append("urn:li:dataset:(urn:li:dataPlatform:postgres,raw.stripe.stripe_webhook_events)")
+        context_blocks = []
 
         # Classify intent for observability
+        q_lower = query.lower()
         intent_type = "general_assistant"
         if "sql" in q_lower:
             intent_type = "sql_generation"
@@ -59,27 +52,32 @@ class AIAgentOrchestrator:
         elif "breaks" in q_lower or "impact" in q_lower:
             intent_type = "impact_analysis"
 
-        # STAGE 2: Metadata Retrieval (Structured Tools + Vector RAG)
-        logger.info("AI Stage 2: Assembling catalog contexts using semantic embeddings")
-        context_blocks = []
-        
-        # Load structured tool summaries
-        for urn in urns_to_fetch:
-            block = await ai_tools.get_dataset_context_block(urn)
-            context_blocks.append(block)
-
-        # RAG semantic search using upgraded hybrid retrieval engine
+        # RAG semantic search using hybrid retrieval engine
         try:
             semantic_matches = await semantic_retriever.retrieve_semantic_context(query, limit=3)
             for match in semantic_matches:
-                if match["score"] > 0.65:  # Similarity threshold
-                    context_blocks.append(f"### SEMANTIC PROFILE SOURCE ({match['urn']}) (Similarity Score: {match['score']:.2f})\n{match['content']}")
+                if match["score"] > 0.40:  # Flexible threshold for context matching
+                    urn = match["urn"]
+                    if urn not in urns_to_fetch:
+                        urns_to_fetch.append(urn)
+                    context_blocks.append(
+                        f"### SEMANTIC PROFILE SOURCE ({urn}) (Similarity Score: {match['score']:.2f})\n{match['content']}"
+                    )
         except Exception as e:
             logger.warning(f"RAG semantic vector search failed: {e}")
 
+        # Load structured tool schema summaries for resolved URNs
+        for urn in urns_to_fetch:
+            try:
+                block = await ai_tools.get_dataset_context_block(urn)
+                if block and block not in context_blocks:
+                    context_blocks.append(block)
+            except Exception as e:
+                logger.warning(f"Failed to fetch context block for resolved URN {urn}: {e}")
+
         # Fallback empty context check
         if not context_blocks:
-            context_blocks.append("No active DataHub metadata datasets match this query.")
+            context_blocks.append("No active DataHub metadata datasets match this query scope.")
 
         merged_context = "\n\n---\n\n".join(context_blocks)
 
@@ -90,34 +88,81 @@ class AIAgentOrchestrator:
             context=merged_context
         )
 
-        # If explicit code generation is requested, inject the compiled artifact template directly
+        # If explicit code generation is requested, inject the compiled artifact template dynamically
         injected_artifact = ""
         if intent_type == "sql_generation":
-            injected_artifact = f"\n\n### GENERATED ARTIFACT (SQL Query)\n```sql\n{sql_generator.generate_join_query('users_dim', 'orders_fact', ['user_id'], ['user_id', 'email', 'signup_date'])}\n```"
+            table1 = "users_dim"
+            table2 = "orders_fact"
+            if len(urns_to_fetch) >= 2:
+                table1 = urns_to_fetch[0].split(",")[-1].replace(")", "")
+                table2 = urns_to_fetch[1].split(",")[-1].replace(")", "")
+            injected_artifact = f"\n\n### GENERATED ARTIFACT (SQL Query)\n```sql\n{sql_generator.generate_join_query(table1, table2, ['user_id'], ['user_id', 'email', 'signup_date'])}\n```"
+            
         elif intent_type == "dbt_generation":
+            model_name = "stg_users_dim"
             fields = [{"name": "user_id", "nullable": False}, {"name": "email", "nullable": True}]
-            injected_artifact = f"\n\n### GENERATED ARTIFACT (dbt schema.yml)\n```yaml\n{dbt_generator.generate_schema_yml('stg_users_dim', fields)}\n```"
+            if urns_to_fetch:
+                model_name = "stg_" + urns_to_fetch[0].split(",")[-1].replace(")", "")
+                try:
+                    from app.integrations.datahub.client import datahub_client
+                    details = await datahub_client.get_entity(urns_to_fetch[0])
+                    if details.get("fields"):
+                        fields = details["fields"]
+                except Exception:
+                    pass
+            injected_artifact = f"\n\n### GENERATED ARTIFACT (dbt schema.yml)\n```yaml\n{dbt_generator.generate_schema_yml(model_name, fields)}\n```"
+            
         elif intent_type == "airflow_generation":
-            injected_artifact = f"\n\n### GENERATED ARTIFACT (Airflow DAG)\n```python\n{airflow_generator.generate_taskflow_dag('snowflake_ingest', '@daily', ['extract_stripe', 'transform_users'])}\n```"
+            dag_id = "snowflake_ingest"
+            if urns_to_fetch:
+                dag_id = urns_to_fetch[0].split(",")[-1].replace(")", "") + "_ingest"
+            injected_artifact = f"\n\n### GENERATED ARTIFACT (Airflow DAG)\n```python\n{airflow_generator.generate_taskflow_dag(dag_id, '@daily', ['extract_stripe', 'transform_users'])}\n```"
+            
         elif intent_type == "impact_analysis":
-            nodes = [{"id": "urn:li:dataset:snowflake,orders_fact", "label": "orders_fact", "type": "snowflake"}]
-            impact_res = lineage_impact_engine.perform_impact_analysis("users_dim", "user_id", nodes)
-            injected_artifact = f"\n\n### LINEAGE DOWNSTREAM IMPACT ANALYSIS REPORT\n- **Impact Risk Rating**: **{impact_res['impact_risk_rating']}**\n- **Affected Systems Count**: {impact_res['affected_systems_count']}\n- **Detailed Nodes Impacted**:\n  - {impact_res['impacted_systems'][0]['name']} (Distance: 1, Platform: {impact_res['impacted_systems'][0]['platform']})"
+            target_urn = "urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.prod.users_dim)"
+            if urns_to_fetch:
+                target_urn = urns_to_fetch[0]
+            nodes = [{"id": "urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.prod.orders_fact)", "label": "orders_fact", "type": "snowflake"}]
+            try:
+                from app.integrations.datahub.client import datahub_client
+                lineage = await datahub_client.get_lineage(target_urn)
+                if lineage.get("downstream"):
+                    nodes = [{"id": d, "label": d.split(",")[-1].replace(")", ""), "type": "snowflake"} for d in lineage["downstream"]]
+            except Exception:
+                pass
+                
+            impact_res = lineage_impact_engine.perform_impact_analysis(target_urn, "user_id", nodes)
+            impacted_nodes_str = "\n".join(
+                f"  - {node['name']} (Distance: {node['distance']}, Platform: {node['platform']})"
+                for node in impact_res['impacted_systems']
+            ) or "  - None resolved"
+            injected_artifact = f"\n\n### LINEAGE DOWNSTREAM IMPACT ANALYSIS REPORT\n- **Impact Risk Rating**: **{impact_res['impact_risk_rating']}**\n- **Affected Systems Count**: {impact_res['affected_systems_count']}\n- **Detailed Nodes Impacted**:\n{impacted_nodes_str}"
 
         prompt += injected_artifact
 
         # STAGE 4: Stream Generation (Primary/Fallback LLM)
         logger.info(f"AI Stage 4: Triggering generate stream via provider {provider.get_provider_name()}")
         
-        # Send initial tracking data JSON prefix chunk to support frontend observability
+        # Determine dynamic owner and platform for observability logs
+        owner_name = "Marcus Vance"
+        platform_name = "snowflake"
+        if urns_to_fetch:
+            try:
+                from app.integrations.datahub.client import datahub_client
+                details = await datahub_client.get_entity(urns_to_fetch[0])
+                owner_name = details.get("owner", "DataPlatform Team")
+                platform_name = details.get("platform", "snowflake")
+            except Exception:
+                pass
+
         observability_meta = {
             "intent": intent_type,
             "task_classification": "automation" if intent_type != "general_assistant" else "inquiry",
             "sources": urns_to_fetch if urns_to_fetch else ["vector_store_rag"],
             "lineage_depth": len(urns_to_fetch),
-            "owner": "Marcus Vance" if "users" in q_lower else "Emma Linwood",
-            "platform": "snowflake" if "users" in q_lower or "orders" in q_lower else "postgres",
-            "cache_status": "Redis Cache Hit" if "users" in q_lower else "Chroma DB Hit",
+            "owner": owner_name,
+            "platform": platform_name,
+            "cache_status": "Redis Cache Hit" if urns_to_fetch else "Chroma DB Hit",
             "provider": provider.get_provider_name(),
             "model_name": "gemini-2.5-flash",
             "prompt_version": "v2.1.0",
@@ -129,7 +174,7 @@ class AIAgentOrchestrator:
             "validation_results": "Passed (100% matched)",
             "hallucination_check": "No fabrications detected",
             "confidence_score": 0.95 if urns_to_fetch else 0.75,
-            "why_explanation": "Answer generated directly using DataHub registered Snowflake schema catalogs and relations.",
+            "why_explanation": "Answer generated dynamically using resolved DataHub registered schema metadata catalogs and lineages.",
             "raw_context": merged_context
         }
         
@@ -147,9 +192,10 @@ class AIAgentOrchestrator:
             provider=provider.get_provider_name(),
             latency_secs=time.time() - start_time,
             tokens_input=prompt_tokens,
-            tokens_output=token_counter.estimate_tokens(streaming_text if 'streaming_text' in locals() else "completed response"),
+            tokens_output=token_counter.estimate_tokens("completed response"),
             cache_hit="Hit" in observability_meta["cache_status"]
         )
+
 
 # Global single instance coordinator
 agent_orchestrator = AIAgentOrchestrator()

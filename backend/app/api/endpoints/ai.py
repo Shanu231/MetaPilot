@@ -5,6 +5,8 @@ from typing import Optional, Any
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.database.db import get_db, AsyncSessionLocal
 from app.dependencies.auth_dep import get_current_user
 from app.ai.agents.orchestrator import agent_orchestrator
 from app.ai.memory.session import memory_manager
@@ -38,10 +40,14 @@ async def chat_stream(
                     full_response.append(chunk)
                 yield f"data: {chunk}\n\n"
             
-            # Save final concatenated response to conversation memory logs
+            # Save final concatenated response to conversation memory logs using a dedicated session
             assistant_text = "".join(full_response)
-            memory_manager.add_message(session_id, "user", query)
-            memory_manager.add_message(session_id, "assistant", assistant_text)
+            async with AsyncSessionLocal() as db_session:
+                # Use query as the default title for the session if it's new
+                title = query[:40] + "..." if len(query) > 40 else query
+                await memory_manager.get_or_create_session(db_session, session_id, current_user.id, title)
+                await memory_manager.add_message(db_session, session_id, "user", query, current_user.id)
+                await memory_manager.add_message(db_session, session_id, "assistant", assistant_text, current_user.id)
             
         except Exception as e:
             logger.error(f"Error in chat streaming generator loop: {e}")
@@ -52,27 +58,42 @@ async def chat_stream(
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.get("/chat/history")
-async def chat_history(current_user: Any = Depends(get_current_user)):
-    # Initialize basic conversations if registry is empty
-    sessions = memory_manager.list_sessions()
+async def chat_history(
+    current_user: Any = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    sessions = await memory_manager.list_sessions(db, current_user.id)
     if len(sessions) == 0:
-        sess_id = "sess-default-lineage"
-        memory_manager.get_or_create_session(sess_id)
-        memory_manager.add_message(sess_id, "user", "Explain customer pipeline.")
-        memory_manager.add_message(sess_id, "assistant", "Based on DataHub mappings, the customer ingest pipeline Stages raw Snowflake data flows into Stage analytics tables.")
-        sessions = memory_manager.list_sessions()
+        # Seed default help chat
+        sess_id = f"sess-default-{uuid.uuid4()}"
+        await memory_manager.get_or_create_session(db, sess_id, current_user.id, "Explain customer pipeline")
+        await memory_manager.add_message(db, sess_id, "user", "Explain customer pipeline.", current_user.id)
+        await memory_manager.add_message(
+            db, 
+            sess_id, 
+            "assistant", 
+            "Based on DataHub mappings, the customer ingest pipeline stages raw Snowflake data flows into Stage analytics tables.", 
+            current_user.id
+        )
+        sessions = await memory_manager.list_sessions(db, current_user.id)
         
     return sessions
 
 @router.post("/chat/pins")
-async def chat_pin(body: PinRequest, current_user: Any = Depends(get_current_user)):
-    memory_manager.set_pin(body.session_id, body.pinned)
+async def chat_pin(
+    body: PinRequest, 
+    current_user: Any = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    await memory_manager.set_pin(db, body.session_id, body.pinned)
     return {"detail": f"Session pin state updated: {body.pinned}"}
 
 @router.delete("/chat/{session_id}")
 async def delete_chat_session(
     session_id: str,
-    current_user: Any = Depends(get_current_user)
+    current_user: Any = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
 ):
-    memory_manager.delete_session(session_id)
+    await memory_manager.delete_session(db, session_id)
     return {"detail": "Conversation session removed successfully."}
+

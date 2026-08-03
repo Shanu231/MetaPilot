@@ -20,6 +20,7 @@ class User(Base):
     sessions = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     notifications = relationship("Notification", back_populates="user", cascade="all, delete-orphan")
     audit_logs = relationship("AuditLog", back_populates="user", cascade="all, delete-orphan")
+    chat_sessions = relationship("ChatSession", back_populates="user", cascade="all, delete-orphan")
 
 class Workspace(Base):
     __tablename__ = "workspaces"
@@ -67,3 +68,28 @@ class AuditLog(Base):
     timestamp = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
 
     user = relationship("User", back_populates="audit_logs")
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    user_id = Column(String(36), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    title = Column(String(128), nullable=False)
+    pinned = Column(Boolean, default=False, nullable=False)
+    summary = Column(String(256), nullable=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    user = relationship("User", back_populates="chat_sessions")
+    messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id = Column(String(36), ForeignKey("chat_sessions.id", ondelete="CASCADE"), nullable=False)
+    sender = Column(String(32), nullable=False)  # user or assistant
+    content = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=lambda: datetime.now(UTC), nullable=False)
+
+    session = relationship("ChatSession", back_populates="messages")
+

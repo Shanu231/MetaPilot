@@ -1,4 +1,5 @@
 from typing import List, Union
+import logging
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -12,6 +13,7 @@ class Settings(BaseSettings):
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+
 
     # Database Mappings
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/metapilot"
@@ -37,6 +39,18 @@ class Settings(BaseSettings):
     CHROMADB_PERSIST_PATH: str = "./chroma_db"
     USE_CHROMADB: bool = True
 
+    @field_validator("JWT_SECRET_KEY", mode="before")
+    @classmethod
+    def validate_jwt_secret(cls, v: str) -> str:
+        default_secret = "3b00c9e62f58e1c6cd1492ba268db45136873322aa6006f157ad71249b2ef1e0"
+        if v == default_secret:
+            logger = logging.getLogger("metapilot_backend")
+            logger.warning(
+                "SECURITY WARNING: JWT_SECRET_KEY is configured with the default fallback value. "
+                "For production environments, override this by setting JWT_SECRET_KEY in the environment or .env file."
+            )
+        return v
+
     @field_validator("ALLOWED_CORS_ORIGINS", mode="before")
     @classmethod
     def assemble_cors_origins(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
@@ -52,3 +66,4 @@ class Settings(BaseSettings):
     )
 
 settings = Settings()
+

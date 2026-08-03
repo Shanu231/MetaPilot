@@ -1,6 +1,7 @@
 import logging
 from typing import Optional, Dict, Any
 from pydantic import BaseModel
+# pyrefly: ignore [missing-import]
 from fastapi import APIRouter, Depends, BackgroundTasks, status
 from app.dependencies.auth_dep import get_current_user
 from app.ai.vector.collections.manager import chroma_manager

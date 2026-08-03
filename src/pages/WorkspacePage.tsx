@@ -267,7 +267,7 @@ export function WorkspacePage() {
               try {
                 const meta = JSON.parse(dataStr.substring(9));
                 setMetaInfo(meta);
-              } catch (e) {
+              } catch {
                 // Ignore parsing errors
               }
             } else {
